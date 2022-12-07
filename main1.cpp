@@ -20,6 +20,92 @@ struct Input {
     InputType type;
 };
 
+// Envelope generator class
+
+class envelope {
+    float attack_time;
+    float decay_time;
+    float release_time;
+    int sustain_amp;
+    int attack_amp;
+
+public:
+    bool note_on;
+    bool got_start_time;
+    bool got_end_time;
+    int start_time;
+    int end_time;
+    int process_time;
+    int fade_out_time;
+
+    envelope() {
+        attack_time = 800;
+        decay_time = 1200;
+        release_time = 20000;
+        attack_amp = 2500;
+        sustain_amp = 2000;
+        start_time = 0;
+        end_time = 0;
+        got_start_time = false;
+        got_end_time = false;
+    }
+
+    // getting time of Note On message
+
+    void get_start_time(int step, bool Note_On) {
+        if(got_start_time == false && Note_On == true)
+        {
+            start_time = step;
+            got_start_time = true;
+        }
+    }
+
+    // getting time of Note Off message
+
+    void get_end_time(int step, bool Note_On) {
+        if(got_end_time == false && Note_On == false)
+        {
+            end_time = step;
+            got_end_time = true;
+        }
+    }
+
+    // Amplitude generation with envelope
+
+    float process(int t, bool Note_On) {
+        float amp = 0.0;
+        
+        if(Note_On == true) {
+            process_time = t - start_time;
+
+            if(process_time <= attack_time) {   // ATTACK
+                amp = (process_time / attack_time) * attack_amp;
+            }
+
+            if(process_time > attack_time && process_time <= (attack_time + decay_time)) {  // DECAY
+                amp = ((process_time - attack_time) / decay_time) * (sustain_amp - attack_amp) + attack_amp;
+            }
+
+            if(process_time > attack_time + decay_time) {   // SUSTAIN
+                amp = sustain_amp;
+            }
+            got_end_time = false;
+            fade_out_time = 0;
+            end_time = 0;
+        }
+        else if(Note_On == false) {     // RELEASE
+            fade_out_time = t - end_time;
+            amp = (fade_out_time / release_time) * (0 - sustain_amp) + sustain_amp;
+            got_start_time = false;
+            start_time = 0;
+            process_time = 0;
+        }
+        if(amp < 0) {
+            amp = 0;
+        }
+        return amp;
+    }
+};
 
 // Node
 struct Node {
@@ -68,14 +154,21 @@ Node square(Input input) {
 
 Node sine(Input input) {
     int step = 0;
+    envelope env;
+
     Input midi_in;
     midi_in.type = MIDI;
 
     auto func = [=] (std::vector<float> sig) mutable -> float {
-        step += 1;
+        step += 1; 
+        env.get_start_time(step, sig[1]);
+        env.get_end_time(step, sig[1]);
+        float env_amp = env.process(step, (bool)sig[1]);
+        
+
         const float length = 44100 / sig[2];
         float cycles = step / length;
-        return (1 * sin(2 * M_PI * cycles)+ sig[0]) * sig[1] * 2000.0 * sig[3];
+        return (sin(2 * M_PI * cycles)+ sig[0]) * sig[3] * env_amp;
     };
     std::vector<Input> inputs{input, midi_in};
 
@@ -125,46 +218,7 @@ Node gain(Input input, float gain) {
     return node;    
 }
 
-Node envelope(Input input) {
-    float attack_time = 8000;
-    float decay_time = 12000;
-    float sustain_time = 40000;
-    float release_time = 12000;
-    int sustain_amp = 2000;
-    int attack_amp = 2500;
-    int step = 0;
-
-    auto func = [=] (std::vector<float> sig) mutable -> float {
-        int gain;
-
-        if(step <= attack_time) {
-            gain = (step / attack_time) * attack_amp;
-        }
-
-        if(step > attack_time && step <= (attack_time + decay_time)) {
-            gain = ((step - attack_time) / decay_time) * (sustain_amp - attack_amp) + attack_amp;
-        }
-
-        if(step > (attack_time + decay_time) && step <= (attack_time + decay_time + sustain_time)) {
-            gain = sustain_amp;
-        }
-
-        if(step > (attack_time + decay_time + sustain_time) && step <= (attack_time + decay_time + sustain_time + release_time)) {
-            gain = ((step - (attack_time + decay_time + sustain_time)) / release_time) * (0 - sustain_amp) + sustain_amp;
-        } 
-
-        if (step > (attack_time + decay_time + sustain_time + release_time)) {
-            gain = 0;
-        }
-
-        step += 1;
-        return sig[0] * gain;
-    };
-    std::vector<Input> inputs{input};
-
-    Node node{func, inputs};
-    return node;    
-}
+// Audio output management node
 
 Node audio_out(Input input, int id) {
     std::array<short, 128> samples;
@@ -190,6 +244,7 @@ Node audio_out(Input input, int id) {
     return node;    
 }
 
+// Makes an array of frequencies based on TET system
 
 std::vector<float> calculate_frequencies(float tuning_frequency) {
     std::vector<float> notes;
@@ -217,6 +272,8 @@ enum MidiMsgType {
     NOTE_ON,
 };
 
+// MIDI message structure
+
 struct MidiMsg {
     union {
         NoteOn note_on;
@@ -225,6 +282,8 @@ struct MidiMsg {
 
     MidiMsgType type;
 };
+
+// Creating MIDI message for MIDI input
 
 std::optional<MidiMsg> get_midi_input(libremidi::midi_in& midi) {
     MidiMsg msg;
@@ -305,7 +364,6 @@ public:
                         inputs.push_back(0); 
                         inputs.push_back(0);
                         inputs.push_back(0);
-                        std::cout << "nothing" << std::endl;
                     }
                 }
             }
@@ -349,7 +407,7 @@ int main() {
     Node zero = start_node();
     Input zero_in = synth.addNode(zero);
 
-    Node osc2 = sine(zero_in);
+    Node osc2 = square(zero_in);
     Input osc2_in = synth.addNode(osc2);
 
     Node output = audio_out(osc2_in, id);
