@@ -7,17 +7,43 @@
 #include <SDL2/SDL.h>
 #include <libremidi/libremidi.hpp>
 #include <optional>
+#include <random>
+#include <span>
 
 
 enum InputType {
     NODE,
     MIDI,
+    LFO_IN,
+    NOTE_ON_IN,
 };
 
 // Input
 struct Input {
     std::size_t idx;
+    std::size_t midi_idx;
+    int mode;
     InputType type;
+};
+
+class Lfo {
+    float freq;
+    int step;
+public:
+    float amp;
+
+    Lfo() {
+        freq = 5;
+        amp = 0;
+        step = 0;
+    }
+
+    void sine() {
+        step++;
+        float length = 44100 / freq;
+        double cycles = step / length;
+        amp = sin(2 * M_PI * cycles);
+    }
 };
 
 // Envelope generator class
@@ -37,9 +63,10 @@ public:
     int end_time;
     int process_time;
     int fade_out_time;
+    bool envelope_unactive;
 
     envelope() {
-        attack_time = 800;
+        attack_time = 1000;
         decay_time = 1200;
         release_time = 20000;
         attack_amp = 2500;
@@ -48,6 +75,7 @@ public:
         end_time = 0;
         got_start_time = false;
         got_end_time = false;
+        envelope_unactive = true;
     }
 
     // getting time of Note On message
@@ -57,6 +85,7 @@ public:
         {
             start_time = step;
             got_start_time = true;
+            envelope_unactive = false;
         }
     }
 
@@ -90,6 +119,7 @@ public:
                 amp = sustain_amp;
             }
             got_end_time = false;
+            envelope_unactive = false;
             fade_out_time = 0;
             end_time = 0;
         }
@@ -100,8 +130,9 @@ public:
             start_time = 0;
             process_time = 0;
         }
-        if(amp < 0) {
+        if(Note_On == false && amp < 0) {
             amp = 0;
+            envelope_unactive = true;
         }
         return amp;
     }
@@ -109,22 +140,22 @@ public:
 
 // Node
 struct Node {
-    std::function<float(std::vector<float>)> func;
+    std::function<float(std::span<float>)> func;
     std::vector<Input> inputs;
     float output;
 
-    Node(std::function<float(std::vector<float>)> func, std::vector<Input> inputs) {
+    Node(std::function<float(std::span<float>)> func, std::vector<Input> inputs) {
         this->func = func;
         this->inputs = inputs;
     }
 
-    void compute(std::vector<float> inputs) {
+    void compute(std::span<float> inputs) {
         this->output = this->func(inputs);
     }
 };
 
 Node start_node() {
-    auto func = [=] (std::vector<float> sig) mutable -> float { return 0; };
+    auto func = [=] (std::span<float> sig) mutable -> float { return 0; };
     std::vector<Input> inputs;
     Node node{func, inputs};
     return node;
@@ -132,43 +163,163 @@ Node start_node() {
 
 // OSCILATOR NODES
 
-Node square(Input input) {
-    int step = 0;
-    Input midi_in;
-    midi_in.type = MIDI;
+Node Noise(Input input) {
+    Input note_on_in;
+    note_on_in.type = NOTE_ON_IN;
 
-    auto func = [=] (std::vector<float> sig) mutable -> float {
+    envelope env;
+    int step = 0;
+    float noise;
+
+    auto func = [=] (std::span<float> sig) mutable -> float { 
         step += 1;
-        const float length = 44100.0 / sig[2];
-        if(fmod(step, length) > length / 2) {
-            return (1.0 + sig[0]) * sig[1] * 2000.0 * sig[3];
+        float note_on = sig[1];
+        float velocity = sig[2];
+        env.get_start_time(step, note_on);
+        env.get_end_time(step, note_on);
+
+        if(env.envelope_unactive == false) {
+            float env_amp = env.process(step, note_on);
+            noise = (2.0 * ((double)rand() / (double)RAND_MAX) - 1.0) * velocity * env_amp * 0.5;
+
+            return noise + sig[0]; 
         } else {
-            return (-1.0 + sig[0]) * sig[1] * 2000.0 * sig[3];
+            return sig[0];
         }
     };
-    std::vector<Input> inputs = {input, midi_in};
+    std::vector<Input> inputs{input, note_on_in};
+    Node node{func, inputs};
+    return node;
+}
+
+Node square(Input input, float freq, std::size_t midi_idx) {
+    int step = 0;
+    Input midi_in;
+    Input LFO_in;
+    midi_in.type = MIDI;
+    midi_in.midi_idx = midi_idx;
+    LFO_in.type = LFO_IN;
+    envelope env;
+
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        step += 1;
+        float note_on = sig[1];
+        float velocity = sig[2];
+        float lfo_amp = sig[3] / 8;
+
+        env.get_start_time(step, note_on);
+        env.get_end_time(step, note_on);
+
+        if(env.envelope_unactive == false) {
+            float env_amp = env.process(step, note_on);
+            const float length = 44100.0 / freq;
+            float cycles = step / length;
+
+            if((sin(2 * M_PI * cycles + 2 * M_PI)) > 0) {
+                return 1.0 * velocity * env_amp * velocity + sig[0];
+            } else {
+                return -1.0 * velocity * env_amp * velocity + sig[0];
+            }
+        } else {
+            return sig[0];
+        }
+    };
+    std::vector<Input> inputs = {input, midi_in, LFO_in};
     
     Node node{func, inputs};
     return node;
 }
 
-Node sine(Input input) {
+Node sine(Input input, float freq, std::size_t midi_idx) {
     int step = 0;
     envelope env;
 
     Input midi_in;
     midi_in.type = MIDI;
+    midi_in.midi_idx = midi_idx;
+    Input lfo_in;
+    lfo_in.type = LFO_IN;
 
-    auto func = [=] (std::vector<float> sig) mutable -> float {
+    auto func = [=] (std::span<float> sig) mutable -> float {
         step += 1; 
-        env.get_start_time(step, sig[1]);
-        env.get_end_time(step, sig[1]);
-        float env_amp = env.process(step, (bool)sig[1]);
-        
+        float note_on = sig[1];
+        float velocity = sig[2];
+        float lfo_amp = sig[3] / 4;
 
-        const float length = 44100 / sig[2];
-        float cycles = step / length;
-        return (sin(2 * M_PI * cycles)+ sig[0]) * sig[3] * env_amp;
+        env.get_start_time(step, note_on);
+        env.get_end_time(step, note_on);
+        if(env.envelope_unactive == false) {
+            float env_amp = env.process(step, note_on);
+        
+            const float length = 44100 / freq;
+            float cycles = step / length;
+            return (sin(2 * M_PI * cycles + 2 * M_PI * lfo_amp)) * velocity * env_amp + sig[0];
+        } else {
+            return sig[0];
+        }
+    };
+    std::vector<Input> inputs{input, midi_in, lfo_in};
+
+    Node node{func, inputs};
+    return node;
+}
+
+Node triangle(Input input, float freq, std::size_t midi_idx) {
+    int step = 0;
+    envelope env;
+    Input midi_in;
+    midi_in.type = MIDI;
+    midi_in.midi_idx = midi_idx;
+    Input lfo_in;
+    lfo_in.type = LFO_IN;
+
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        step += 1; 
+        float note_on = sig[1];
+        float velocity = sig[2];
+        float lfo_amp = sig[3] / 4;
+
+        env.get_start_time(step, note_on);
+        env.get_end_time(step, note_on);
+
+        if(env.envelope_unactive == false) {
+            float env_amp = env.process(step, note_on);
+            const float length = 44100.0 / freq;
+            float cycles = step / length;
+            return (asin(sin(2 * M_PI * cycles + 2 * M_PI * lfo_amp)) * 2 / M_PI) * velocity * env_amp + sig[0];
+        } else {
+            return sig[0];
+        }
+    };
+    std::vector<Input> inputs{input, midi_in, lfo_in};
+
+    Node node{func, inputs};
+    return node;
+}
+
+Node sawtooth(Input input, float freq, std::size_t midi_idx) {
+    int step = 0;
+    envelope env;
+    Input midi_in;
+    midi_in.type = MIDI;
+    midi_in.midi_idx = midi_idx;
+
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        step += 1; 
+        float note_on = sig[1];
+        float velocity = sig[2];
+
+        env.get_start_time(step, note_on);
+        env.get_end_time(step, note_on);
+
+        if(env.envelope_unactive == false) {
+            float env_amp = env.process(step, note_on);
+            const float length = 44100.0 / freq;
+            int cycle = fmod(step, length);
+            return ((cycle/length) * 2.0 - 1.0) * velocity * env_amp + sig[0];
+        } else {
+            return sig[0];
+        }
     };
     std::vector<Input> inputs{input, midi_in};
 
@@ -176,29 +327,45 @@ Node sine(Input input) {
     return node;
 }
 
-Node triangle(Input input, float freq) {
-    int step = 0;
+// FILTERS
 
-    auto func = [=] (std::vector<float> sig) mutable -> float {
-        step += 1;
-        const float length = 44100 / freq;
-        float cycles = step / length;
-        return asin(sin(2 * M_PI * cycles)) * 2 / M_PI+ sig[0];
+Node low_pass(Input input, float cutoff, bool lfo_modulation) {
+    Input lfo_in;
+    lfo_in.type = LFO_IN;
+
+    float tg = tan(M_PI * cutoff / 44100.0);
+    float dn_1 = 0;
+
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        if(lfo_modulation == true) {
+            float new_cutoff = cutoff + sig[1]* 1000;
+            float tg = tan(M_PI * new_cutoff / 44100.0);
+        }
+        
+        float a1_coef = (tg - 1.0) / (tg + 1.0);
+        float filter_out = a1_coef * sig[0] + dn_1;;
+        dn_1 = sig[0] - a1_coef * filter_out;
+
+        
+        return filter_out + sig[0];
     };
-    std::vector<Input> inputs{input};
+    std::vector<Input> inputs{input, lfo_in};
 
     Node node{func, inputs};
     return node;
 }
 
-Node sawtooth(Input input, float freq) {
-    int step = 0;
+Node high_pass(Input input, float cutoff) {
+    float dn_1 = 0;
+    float tg = tan(M_PI * cutoff / 44100.0);
+    float a1_coef = (tg - 1.0) / (tg + 1.0);
 
-    auto func = [=] (std::vector<float> sig) mutable -> float {
-        step += 1;
-        const float length = 44100.0 / freq;
-        int cycle = fmod(step, length);
-        return (cycle/length) * 2.0 - 1.0 + sig[0];
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        float filter_out = a1_coef * sig[0] + dn_1;;
+        dn_1 = sig[0] - a1_coef * filter_out;
+
+        
+        return filter_out + sig[0];
     };
     std::vector<Input> inputs{input};
 
@@ -209,7 +376,7 @@ Node sawtooth(Input input, float freq) {
 // AMPLITUDE CONTROL NODES
 
 Node gain(Input input, float gain) {
-    auto func = [=] (std::vector<float> sig) mutable -> float {
+    auto func = [=] (std::span<float> sig) mutable -> float {
         return sig[0] * gain;
     };
     std::vector<Input> inputs{input};
@@ -218,22 +385,35 @@ Node gain(Input input, float gain) {
     return node;    
 }
 
+Node tremolo(Input input) {
+    Input lfo_in;
+    lfo_in.type = LFO_IN;
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        return sig[0] * sig[1];
+    };
+    std::vector<Input> inputs{input, lfo_in};
+
+    Node node{func, inputs};
+    return node;    
+}
+
 // Audio output management node
 
 Node audio_out(Input input, int id) {
-    std::array<short, 128> samples;
+    std::array<short, 512> audio_buff;
     int i = 0;
 
-    auto func = [=] (std::vector<float> sig) mutable -> float {
-        samples[i] = sig[0];
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        //std::cout << samples[i] << std::endl;
+        audio_buff[i] = sig[0];
         i += 1;
 
         if(SDL_GetQueuedAudioSize(id)/sizeof(short) > 4410) {
-            SDL_Delay(1);
+            SDL_Delay(2);
         }
 
-        if(i == 128) {
-            SDL_QueueAudio(id, samples.data(), samples.size() * sizeof(short));
+        if(i == 512) {
+            SDL_QueueAudio(id, audio_buff.data(), audio_buff.size() * sizeof(short));
             i = 0;
         }
         return 0;
@@ -260,11 +440,11 @@ std::vector<float> calculate_frequencies(float tuning_frequency) {
 
 struct NoteOn {
     float vel;
-    float freq;
+    std::size_t index;
 };
 
 struct NoteOff {
-    float freq;
+    std::size_t index;
 };
 
 enum MidiMsgType {
@@ -287,34 +467,49 @@ struct MidiMsg {
 
 std::optional<MidiMsg> get_midi_input(libremidi::midi_in& midi) {
     MidiMsg msg;
-    std::vector<float> note_freq = calculate_frequencies(440.0);
+    
 
     auto next_message = midi.get_message();
     if(!next_message.bytes.empty()) {
         if(next_message.bytes[0] == 144) {
             msg.type = NOTE_ON;
-            msg.note_on.freq = note_freq[next_message.bytes[1]];
+            msg.note_on.index = next_message.bytes[1];
             msg.note_on.vel = (float)next_message.bytes[2] / 127;
-            std::cout << "NOTE_ON " << "frequency: " << msg.note_on.freq << " velocity: " <<  msg.note_on.vel << std::endl;
+            //std::cout << "NOTE_ON " << "index: " << msg.note_on.index << " velocity: " <<  msg.note_on.vel << std::endl;
             
         } else if(next_message.bytes[0] == 128) {
             msg.type = NOTE_OFF;
-            msg.note_on.freq = note_freq[next_message.bytes[1]];
-            std::cout << "NOTE_OFF " << "frequency:" << msg.note_on.freq << std::endl;
+            msg.note_on.index = next_message.bytes[1];
+            //std::cout << "NOTE_OFF " << "index:" << msg.note_on.index << std::endl;
         }
-        return msg;       
+        return msg;
     } else {
         return {};
     }
 
 }
 
+// single key state
+
+struct MidiState {      
+    bool note_on = false;
+    float velocity = 0;
+};
+
 /// Synth
 class Synth {
     std::vector<Node> nodes;
+    
 public:
+    Lfo lfo;
     libremidi::midi_in midi;
+    std::array<MidiState, 88> midi_state;
     MidiMsg msg;
+    int any_note_on = 0;
+    float any_vel = 0;
+    std::vector<float> outputs;
+    std::vector<float> inputs;
+
     Synth() = default;
 
 
@@ -334,10 +529,27 @@ public:
     // PROCESSING ALL NODES
 
     void step() {
-        std::vector<float> outputs;
+        this->outputs.clear();
         auto maybe_msg = get_midi_input(midi);
+        lfo.sine();
+        float lfo_amp = lfo.amp;
+
         if(maybe_msg.has_value()) {
             msg = *maybe_msg;
+            if(msg.type == NOTE_ON){        //writing in state
+                midi_state[msg.note_on.index].note_on = 1;
+                midi_state[msg.note_on.index].velocity = msg.note_on.vel;
+                any_note_on ++;
+                any_vel = msg.note_on.vel;
+                std::cout << midi_state[msg.note_on.index].velocity << std::endl;
+            } else if(msg.type == NOTE_OFF) {
+                midi_state[msg.note_on.index].note_on = 0;
+                any_note_on --;
+                if(any_note_on == 0) {
+                    any_vel = 0;
+                }
+            }
+            //std::cout << any_note_on << std::endl;
         }
 
         for(const Node& node: this->nodes) {
@@ -345,29 +557,31 @@ public:
         }
 
         for(Node& node: this->nodes) {
-            std::vector<float> inputs;
+            this->inputs.clear();
 
             for(Input& in : node.inputs) {
                 float value;
                 if(in.type == NODE) {
                     value = outputs[in.idx];
                     inputs.push_back(value);
-                } else if(in.type == MIDI) {      
-                    if(msg.type == NOTE_OFF) {
-                        inputs.push_back(msg.type);
-                        inputs.push_back(msg.note_off.freq);
-                    } else if(msg.type == NOTE_ON) {
-                        inputs.push_back(msg.type); 
-                        inputs.push_back(msg.note_on.freq);
-                        inputs.push_back(msg.note_on.vel);
+                } else if(in.type == MIDI) {
+                    inputs.push_back(static_cast<float>(midi_state[in.midi_idx].note_on)); 
+                    //std::cout << "\n note_on = " << midi_state[in.midi_idx].note_on;  // pokazuje ze dobrze
+                    inputs.push_back(midi_state[in.midi_idx].velocity);
+                    //std::cout << "\n velocity = " << midi_state[in.midi_idx].velocity << std::endl;    // pokazuje ze dobrze   
+                } else if(in.type == LFO_IN) {
+                    inputs.push_back(lfo_amp);
+                } else if(in.type == NOTE_ON_IN) {
+                    if(any_note_on == 0) {
+                        inputs.push_back(0.0);
                     } else {
-                        inputs.push_back(0); 
-                        inputs.push_back(0);
-                        inputs.push_back(0);
+                        inputs.push_back(1.0);
+                        inputs.push_back(any_vel);
                     }
                 }
+                
             }
-            auto output_new = node.func(inputs);
+            auto output_new = node.func(inputs);    // w nodzie square dziala zle 
             node.output = output_new;
         }
     }
@@ -399,6 +613,8 @@ int main() {
     // ADDING NODES
     Input in;
 
+    std::vector<float> note_freq = calculate_frequencies(440.0);
+    std::vector<Input> inputs_definition;
     Synth synth;
 
     synth.midi.open_port(0);
@@ -407,19 +623,43 @@ int main() {
     Node zero = start_node();
     Input zero_in = synth.addNode(zero);
 
-    Node osc2 = square(zero_in);
-    Input osc2_in = synth.addNode(osc2);
+    //Node noise_generator = Noise(zero_in);
+    //Input noise_in = synth.addNode(noise_generator);
 
-    Node output = audio_out(osc2_in, id);
-    Input out = synth.addNode(output);
 
     
+    for(std::size_t i = 48; i <= 72; i++) {
+        if(i == 48) {
+            Node osc = square(zero_in, note_freq[i], i);
+            Input osc_in = synth.addNode(osc);
+            inputs_definition.push_back(osc_in);
+        } else {
+            Node osc = square(inputs_definition[i-49], note_freq[i], i);
+            Input osc_in = synth.addNode(osc);
+            inputs_definition.push_back(osc_in);
+        }
+    }
+
+    Node filter = low_pass(inputs_definition.back(), 1000, true);
+    Input filter_in = synth.addNode(filter);
+    
+    //Node osc = square(zero_in, 440.0, 57);
+    //Input osc_in = synth.addNode(osc);
+    
+    //Node osc2 = square(osc_in, 220.0, 59);
+    //Input osc2_in = synth.addNode(osc2);
+
+    // Node vib = vibrato(oscilator_in.back());
+    // Input vib_in = synth.addNode(vib);
+
+    Node output = audio_out(filter_in, id);
+    Input out = synth.addNode(output);
+
+
 
     while(true) {
         synth.step();
         SDL_Event event;
-        
-        //std::cout << midi_rec.note  << std::endl;
         while (SDL_PollEvent(&event)) {
             switch(event.type) {
                 case SDL_QUIT:
