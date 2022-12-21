@@ -9,6 +9,9 @@
 #include <optional>
 #include <random>
 #include <span>
+#include <deque>
+
+#define SAMPLING_FREQUENCY  44100
 
 
 enum InputType {
@@ -65,12 +68,12 @@ public:
     int fade_out_time;
     bool envelope_unactive;
 
-    envelope() {
-        attack_time = 1000;
-        decay_time = 1200;
-        release_time = 20000;
-        attack_amp = 2500;
-        sustain_amp = 2000;
+    envelope(float at, float dt, float rt) {
+        attack_time = at * SAMPLING_FREQUENCY / 1000;
+        decay_time = dt * SAMPLING_FREQUENCY / 1000;
+        release_time = rt * SAMPLING_FREQUENCY / 1000;
+        sustain_amp = 1;
+        attack_amp = 1.3 * sustain_amp;
         start_time = 0;
         end_time = 0;
         got_start_time = false;
@@ -163,11 +166,10 @@ Node start_node() {
 
 // OSCILATOR NODES
 
-Node Noise(Input input) {
+Node noise(Input input, envelope env) {
     Input note_on_in;
     note_on_in.type = NOTE_ON_IN;
 
-    envelope env;
     int step = 0;
     float noise;
 
@@ -180,7 +182,7 @@ Node Noise(Input input) {
 
         if(env.envelope_unactive == false) {
             float env_amp = env.process(step, note_on);
-            noise = (2.0 * ((double)rand() / (double)RAND_MAX) - 1.0) * velocity * env_amp * 0.5;
+            noise = (2.0 * ((double)rand() / (double)RAND_MAX) - 1.0) * velocity * env_amp * 0.1;
 
             return noise + sig[0]; 
         } else {
@@ -192,14 +194,13 @@ Node Noise(Input input) {
     return node;
 }
 
-Node square(Input input, float freq, std::size_t midi_idx) {
+Node square(Input input, float freq, std::size_t midi_idx, envelope env) {
     int step = 0;
     Input midi_in;
     Input LFO_in;
     midi_in.type = MIDI;
     midi_in.midi_idx = midi_idx;
     LFO_in.type = LFO_IN;
-    envelope env;
 
     auto func = [=] (std::span<float> sig) mutable -> float {
         step += 1;
@@ -215,7 +216,7 @@ Node square(Input input, float freq, std::size_t midi_idx) {
             const float length = 44100.0 / freq;
             float cycles = step / length;
 
-            if((sin(2 * M_PI * cycles + 2 * M_PI)) > 0) {
+            if((sin(2 * M_PI * cycles + 2 * M_PI * lfo_amp)) > 0) {
                 return 1.0 * velocity * env_amp * velocity + sig[0];
             } else {
                 return -1.0 * velocity * env_amp * velocity + sig[0];
@@ -230,9 +231,8 @@ Node square(Input input, float freq, std::size_t midi_idx) {
     return node;
 }
 
-Node sine(Input input, float freq, std::size_t midi_idx) {
+Node sine(Input input, float freq, std::size_t midi_idx, envelope env) {
     int step = 0;
-    envelope env;
 
     Input midi_in;
     midi_in.type = MIDI;
@@ -264,9 +264,8 @@ Node sine(Input input, float freq, std::size_t midi_idx) {
     return node;
 }
 
-Node triangle(Input input, float freq, std::size_t midi_idx) {
+Node triangle(Input input, float freq, std::size_t midi_idx, envelope env) {
     int step = 0;
-    envelope env;
     Input midi_in;
     midi_in.type = MIDI;
     midi_in.midi_idx = midi_idx;
@@ -297,9 +296,8 @@ Node triangle(Input input, float freq, std::size_t midi_idx) {
     return node;
 }
 
-Node sawtooth(Input input, float freq, std::size_t midi_idx) {
+Node sawtooth(Input input, float freq, std::size_t midi_idx, envelope env) {
     int step = 0;
-    envelope env;
     Input midi_in;
     midi_in.type = MIDI;
     midi_in.midi_idx = midi_idx;
@@ -373,16 +371,40 @@ Node high_pass(Input input, float cutoff) {
     return node;
 }
 
+// AUDIO FX
+
+Node delay(const Input input, const int time_ms, const int feedback, const float mix) {
+    std::deque<float> delay_buffer;
+    delay_buffer.resize(time_ms * 45 * feedback, 0);
+
+    auto func = [=] (const std::span<float> sig) mutable -> float {
+        delay_buffer.pop_back();
+        delay_buffer.push_front(sig[0]);
+
+        float delayed_sig = 0;
+        for(int i = 0; i <= feedback; i++) {
+            delayed_sig += powf(mix, i) * delay_buffer[time_ms * 44.1 * i];
+        }
+
+        return delayed_sig;
+    };
+
+    std::vector<Input> inputs{input};
+
+    Node node{func, inputs};
+    return node;
+}
+
 // AMPLITUDE CONTROL NODES
 
-Node gain(Input input, float gain) {
+Node master_gain(const Input input, const float gain) {
     auto func = [=] (std::span<float> sig) mutable -> float {
         return sig[0] * gain;
     };
     std::vector<Input> inputs{input};
 
     Node node{func, inputs};
-    return node;    
+    return node;
 }
 
 Node tremolo(Input input) {
@@ -404,7 +426,7 @@ Node audio_out(Input input, int id) {
     int i = 0;
 
     auto func = [=] (std::span<float> sig) mutable -> float {
-        //std::cout << samples[i] << std::endl;
+        
         audio_buff[i] = sig[0];
         i += 1;
 
@@ -499,7 +521,6 @@ struct MidiState {
 /// Synth
 class Synth {
     std::vector<Node> nodes;
-    
 public:
     Lfo lfo;
     libremidi::midi_in midi;
@@ -549,7 +570,7 @@ public:
                     any_vel = 0;
                 }
             }
-            //std::cout << any_note_on << std::endl;
+
         }
 
         for(const Node& node: this->nodes) {
@@ -613,9 +634,10 @@ int main() {
     // ADDING NODES
     Input in;
 
-    std::vector<float> note_freq = calculate_frequencies(440.0);
+    std::vector<float> note_freq = calculate_frequencies(220.0);
     std::vector<Input> inputs_definition;
     Synth synth;
+    envelope env(50, 30, 100);
 
     synth.midi.open_port(0);
     synth.midi.ignore_types(false, false, false);
@@ -623,18 +645,18 @@ int main() {
     Node zero = start_node();
     Input zero_in = synth.addNode(zero);
 
-    //Node noise_generator = Noise(zero_in);
-    //Input noise_in = synth.addNode(noise_generator);
+    Node noise_generator = noise(zero_in, env);
+    Input noise_in = synth.addNode(noise_generator);
 
 
     
     for(std::size_t i = 48; i <= 72; i++) {
         if(i == 48) {
-            Node osc = square(zero_in, note_freq[i], i);
+            Node osc = square(noise_in, note_freq[i], i, env);
             Input osc_in = synth.addNode(osc);
             inputs_definition.push_back(osc_in);
         } else {
-            Node osc = square(inputs_definition[i-49], note_freq[i], i);
+            Node osc = square(inputs_definition[i-49], note_freq[i], i, env);
             Input osc_in = synth.addNode(osc);
             inputs_definition.push_back(osc_in);
         }
@@ -642,6 +664,9 @@ int main() {
 
     Node filter = low_pass(inputs_definition.back(), 1000, true);
     Input filter_in = synth.addNode(filter);
+
+    Node delaynode = delay(filter_in, 500, 5, 0.5);
+    Input delay_in = synth.addNode(delaynode);
     
     //Node osc = square(zero_in, 440.0, 57);
     //Input osc_in = synth.addNode(osc);
@@ -652,7 +677,10 @@ int main() {
     // Node vib = vibrato(oscilator_in.back());
     // Input vib_in = synth.addNode(vib);
 
-    Node output = audio_out(filter_in, id);
+    Node master = master_gain(delay_in, 800);
+    Input master_in = synth.addNode(master);
+
+    Node output = audio_out(master_in, id);
     Input out = synth.addNode(output);
 
 
