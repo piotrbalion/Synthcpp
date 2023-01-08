@@ -10,9 +10,9 @@
 #include <random>
 #include <span>
 #include <deque>
+#include <fstream>
 
 #define SAMPLING_FREQUENCY  44100
-
 
 enum InputType {
     NODE,
@@ -25,7 +25,6 @@ enum InputType {
 struct Input {
     std::size_t idx;
     std::size_t midi_idx;
-    int mode;
     InputType type;
 };
 
@@ -55,8 +54,8 @@ class envelope {
     float attack_time;
     float decay_time;
     float release_time;
-    int sustain_amp;
-    int attack_amp;
+    float sustain_amp;
+    float attack_amp;
 
 public:
     bool note_on;
@@ -72,8 +71,8 @@ public:
         attack_time = at * SAMPLING_FREQUENCY / 1000;
         decay_time = dt * SAMPLING_FREQUENCY / 1000;
         release_time = rt * SAMPLING_FREQUENCY / 1000;
-        sustain_amp = 1;
-        attack_amp = 1.3 * sustain_amp;
+        sustain_amp = 0.9;
+        attack_amp = 1;
         start_time = 0;
         end_time = 0;
         got_start_time = false;
@@ -180,14 +179,14 @@ Node noise(Input input, envelope env) {
         env.get_start_time(step, note_on);
         env.get_end_time(step, note_on);
 
-        if(env.envelope_unactive == false) {
+        //if(env.envelope_unactive == false) {
             float env_amp = env.process(step, note_on);
-            noise = (2.0 * ((double)rand() / (double)RAND_MAX) - 1.0) * velocity * env_amp * 0.1;
+            noise = (2.0 * ((double)rand() / (double)RAND_MAX) - 1.0);  //* env_amp * 0.1;
 
             return noise + sig[0]; 
-        } else {
-            return sig[0];
-        }
+        //} else {
+        //    return sig[0];
+        //}
     };
     std::vector<Input> inputs{input, note_on_in};
     Node node{func, inputs};
@@ -327,6 +326,134 @@ Node sawtooth(Input input, float freq, std::size_t midi_idx, envelope env) {
 
 // FILTERS
 
+Node biquad_lowpass(const Input input, const float f0, const float Q) {  // template and low pass test
+    float x1 = 0.0; // sample buffers
+    float x2 =0.0; 
+    float y1 = 0.0;
+    float y2 = 0.0;
+
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        float omega = 2 * M_PI * f0 / SAMPLING_FREQUENCY;   // used constants
+        float alpha = sin(omega) / 2 * Q;
+        
+        float b0 = (1 - cos(omega)) / 2;
+        float b1 = (1 - cos(omega)); 
+        float b2 = ((1 - cos(omega)) / 2);
+        float a0 = (1 + alpha);
+        float a1 = (-2 * cos(omega));
+        float a2 = (1 - alpha) ;
+        
+        float output = sig[0] * b0 / a0 + x1 * b1 / a0 + x2 * b2 / a0 - y1 * a1 / a0 - y2 * a2 / a0;
+
+        x2 = x1;
+        x1 = sig[0];
+        y2 = y1;
+        y1 = output;
+        return output;
+    };
+
+    std::vector<Input> inputs{input};
+    Node node(func, inputs);
+
+    return node;
+}
+
+Node biquad_highpass(const Input input, const float f0, const float Q) {  // template and low pass test
+    float x1 = 0.0; // sample buffers
+    float x2 =0.0; 
+    float y1 = 0.0;
+    float y2 = 0.0;
+
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        float omega = 2 * M_PI * f0 / SAMPLING_FREQUENCY;   // used constants
+        float alpha = sin(omega) / 2 * Q;
+        
+        float b0 = (1 + cos(omega)) / 2;
+        float b1 = -(1 + cos(omega)); 
+        float b2 = ((1 + cos(omega)) / 2);
+        float a0 = (1 + alpha);
+        float a1 = (-2 * cos(omega));
+        float a2 = (1 - alpha) ;
+        
+        float output = sig[0] * b0 / a0 + x1 * b1 / a0 + x2 * b2 / a0 - y1 * a1 / a0 - y2 * a2 / a0;
+
+        x2 = x1;
+        x1 = sig[0];
+        y2 = y1;
+        y1 = output;
+        return output;
+    };
+
+    std::vector<Input> inputs{input};
+    Node node(func, inputs);
+
+    return node;
+}
+
+Node biquad_bandpass(const Input input, const float f0, const float BW) {  // BW in octaves
+    float x1 = 0.0; // sample buffers
+    float x2 =0.0; 
+    float y1 = 0.0;
+    float y2 = 0.0;
+
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        float omega = 2 * M_PI * f0 / SAMPLING_FREQUENCY;   // used constants
+        float alpha = sin(omega) * sinh(M_LN2 /2 * BW * omega /sin(omega));
+        
+        float b0 = alpha;
+        float b1 = 0; 
+        float b2 = -alpha;
+        float a0 = 1 + alpha;
+        float a1 = -2 * cos(omega);
+        float a2 = 1 - alpha;
+        
+        float output = sig[0] * b0 / a0 + x1 * b1 / a0 + x2 * b2 / a0 - y1 * a1 / a0 - y2 * a2 / a0;
+
+        x2 = x1;
+        x1 = sig[0];
+        y2 = y1;
+        y1 = output;
+        return output;
+    };
+
+    std::vector<Input> inputs{input};
+    Node node(func, inputs);
+
+    return node;
+}
+
+Node biquad_notch(const Input input, const float f0, const float BW) {  // BW in octaves
+    float x1 = 0.0; // sample buffers
+    float x2 = 0.0; 
+    float y1 = 0.0;
+    float y2 = 0.0;
+
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        float omega = 2 * M_PI * f0 / SAMPLING_FREQUENCY;   // used constants
+        float alpha = sin(omega) * sinh(M_LN2 /2 * BW * omega /sin(omega));
+        
+        float b0 = 1;
+        float b1 = -2 * cos(omega);
+        float b2 = 1;
+        float a0 = 1 + alpha;
+        float a1 = -2 * cos(omega);
+        float a2 = 1 - alpha;
+        
+        float output = sig[0] * b0 / a0 + x1 * b1 / a0 + x2 * b2 / a0 - y1 * a1 / a0 - y2 * a2 / a0;
+
+        x2 = x1;
+        x1 = sig[0];
+        y2 = y1;
+        y1 = output;
+        return output;
+    };
+
+    std::vector<Input> inputs{input};
+    Node node(func, inputs);
+
+    return node;
+}
+
 Node low_pass(Input input, float cutoff, bool lfo_modulation) {
     Input lfo_in;
     lfo_in.type = LFO_IN;
@@ -335,18 +462,14 @@ Node low_pass(Input input, float cutoff, bool lfo_modulation) {
     float dn_1 = 0;
 
     auto func = [=] (std::span<float> sig) mutable -> float {
-        if(lfo_modulation == true) {
-            float new_cutoff = cutoff + sig[1]* 1000;
-            float tg = tan(M_PI * new_cutoff / 44100.0);
-        }
         
         float a1_coef = (tg - 1.0) / (tg + 1.0);
         float filter_out = a1_coef * sig[0] + dn_1;;
         dn_1 = sig[0] - a1_coef * filter_out;
-
-        
+  
         return filter_out + sig[0];
     };
+
     std::vector<Input> inputs{input, lfo_in};
 
     Node node{func, inputs};
@@ -359,7 +482,7 @@ Node high_pass(Input input, float cutoff) {
     float a1_coef = (tg - 1.0) / (tg + 1.0);
 
     auto func = [=] (std::span<float> sig) mutable -> float {
-        float filter_out = a1_coef * sig[0] + dn_1;;
+        float filter_out = -1 * (a1_coef * sig[0] + dn_1);
         dn_1 = sig[0] - a1_coef * filter_out;
 
         
@@ -411,7 +534,7 @@ Node tremolo(Input input) {
     Input lfo_in;
     lfo_in.type = LFO_IN;
     auto func = [=] (std::span<float> sig) mutable -> float {
-        return sig[0] * sig[1];
+        return sig[0] * ((sig[1] / 2.0) + 1);
     };
     std::vector<Input> inputs{input, lfo_in};
 
@@ -428,7 +551,7 @@ Node audio_out(Input input, int id) {
     auto func = [=] (std::span<float> sig) mutable -> float {
         
         audio_buff[i] = sig[0];
-        i += 1;
+        i++;
 
         if(SDL_GetQueuedAudioSize(id)/sizeof(short) > 4410) {
             SDL_Delay(2);
@@ -437,6 +560,31 @@ Node audio_out(Input input, int id) {
         if(i == 512) {
             SDL_QueueAudio(id, audio_buff.data(), audio_buff.size() * sizeof(short));
             i = 0;
+        }
+        return 0;
+    };
+    std::vector<Input> inputs{input};
+
+    Node node{func, inputs};
+    return node;    
+}
+
+Node save_signal(Input input, float msec) {
+    std::vector<float> signal;
+    int total_i = 0;
+
+    auto func = [=] (std::span<float> sig) mutable -> float {
+        
+        signal.push_back(sig[0]);
+        total_i++;
+
+        if (total_i == msec * SAMPLING_FREQUENCY / 1000) {
+            std::ofstream file("signal.csv");
+            float time = 0;
+            for(auto& sample: signal) {
+                file << sample << "; " << time/44100 << "\n";
+                time += 1.0;
+            }
         }
         return 0;
     };
@@ -489,7 +637,6 @@ struct MidiMsg {
 
 std::optional<MidiMsg> get_midi_input(libremidi::midi_in& midi) {
     MidiMsg msg;
-    
 
     auto next_message = midi.get_message();
     if(!next_message.bytes.empty()) {
@@ -533,7 +680,6 @@ public:
 
     Synth() = default;
 
-
     // ADDING NODES TO VECTOR
 
     Input addNode(Node& node) {
@@ -570,7 +716,6 @@ public:
                     any_vel = 0;
                 }
             }
-
         }
 
         for(const Node& node: this->nodes) {
@@ -587,9 +732,9 @@ public:
                     inputs.push_back(value);
                 } else if(in.type == MIDI) {
                     inputs.push_back(static_cast<float>(midi_state[in.midi_idx].note_on)); 
-                    //std::cout << "\n note_on = " << midi_state[in.midi_idx].note_on;  // pokazuje ze dobrze
+                    //std::cout << "\n note_on = " << midi_state[in.midi_idx].note_on;  // it be like okay
                     inputs.push_back(midi_state[in.midi_idx].velocity);
-                    //std::cout << "\n velocity = " << midi_state[in.midi_idx].velocity << std::endl;    // pokazuje ze dobrze   
+                    //std::cout << "\n velocity = " << midi_state[in.midi_idx].velocity << std::endl;    // it be like also okay  
                 } else if(in.type == LFO_IN) {
                     inputs.push_back(lfo_amp);
                 } else if(in.type == NOTE_ON_IN) {
@@ -602,7 +747,7 @@ public:
                 }
                 
             }
-            auto output_new = node.func(inputs);    // w nodzie square dziala zle 
+            auto output_new = node.func(inputs);
             node.output = output_new;
         }
     }
@@ -632,12 +777,11 @@ int main() {
     SDL_PauseAudioDevice(id, 0);
 
     // ADDING NODES
-    Input in;
 
     std::vector<float> note_freq = calculate_frequencies(220.0);
     std::vector<Input> inputs_definition;
     Synth synth;
-    envelope env(50, 30, 100);
+    envelope env(10, 30, 100);
 
     synth.midi.open_port(0);
     synth.midi.ignore_types(false, false, false);
@@ -649,43 +793,44 @@ int main() {
     Input noise_in = synth.addNode(noise_generator);
 
 
-    
-    for(std::size_t i = 48; i <= 72; i++) {
+     
+    /*for(std::size_t i = 48; i <= 72; i++) {
         if(i == 48) {
-            Node osc = square(noise_in, note_freq[i], i, env);
+            Node osc = triangle(zero_in, note_freq[i], i, env);
             Input osc_in = synth.addNode(osc);
             inputs_definition.push_back(osc_in);
         } else {
-            Node osc = square(inputs_definition[i-49], note_freq[i], i, env);
+            Node osc = triangle(inputs_definition[i-49], note_freq[i], i, env);
             Input osc_in = synth.addNode(osc);
             inputs_definition.push_back(osc_in);
         }
-    }
+    }*/
+    
+    
 
-    Node filter = low_pass(inputs_definition.back(), 1000, true);
+    Node filter = biquad_lowpass(noise_in, 1000, 0.707);
     Input filter_in = synth.addNode(filter);
 
-    Node delaynode = delay(filter_in, 500, 5, 0.5);
-    Input delay_in = synth.addNode(delaynode);
+    //Node delaynode = delay(filter_in, 200, 5, 0.5);
+    //Input delay_in = synth.addNode(delaynode);
     
     //Node osc = square(zero_in, 440.0, 57);
     //Input osc_in = synth.addNode(osc);
-    
-    //Node osc2 = square(osc_in, 220.0, 59);
-    //Input osc2_in = synth.addNode(osc2);
 
-    // Node vib = vibrato(oscilator_in.back());
-    // Input vib_in = synth.addNode(vib);
+    //Node vib = vibrato(delay_in);
+    //Input vib_in = synth.addNode(vib);
 
-    Node master = master_gain(delay_in, 800);
+    Node master = master_gain(filter_in, 2000);
     Input master_in = synth.addNode(master);
 
     Node output = audio_out(master_in, id);
     Input out = synth.addNode(output);
 
-
+    int iter;
 
     while(true) {
+        iter++;
+
         synth.step();
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
