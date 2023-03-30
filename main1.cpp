@@ -36,7 +36,7 @@ public:
     float amp;
 
     Lfo() {
-        freq = 5;
+        freq = 4;
         amp = 0;
         step = 0;
     }
@@ -69,11 +69,11 @@ public:
     bool envelope_unactive;
 
     envelope(float at, float dt, float rt) {
-        attack_time = at *SAMPLING_FREQUENCY / 1000;
+        attack_time = at * SAMPLING_FREQUENCY / 1000;
         decay_time = dt * SAMPLING_FREQUENCY / 1000;
         release_time = rt * SAMPLING_FREQUENCY / 1000;
-        sustain_amp = 0.9;
-        attack_amp = sustain_amp * 1.1;
+        sustain_amp = 0.7;
+        attack_amp = 1;
         start_time = 0;
         end_time = 0;
         got_start_time = false;
@@ -208,7 +208,7 @@ Node square(Input input, float freq, std::size_t midi_idx, envelope env) {
         step += 1;
         float note_on = sig[1];
         float velocity = sig[2];
-        float lfo_amp = sig[3] / 8;
+        float lfo_amp = sig[3] / 16;
 
         env.get_start_time(step, note_on);
         env.get_end_time(step, note_on);
@@ -232,8 +232,7 @@ Node square(Input input, float freq, std::size_t midi_idx, envelope env) {
     Node node{func, inputs};
 
     std::cout << "Added square" << std::endl;
-    return node;
-    
+    return node; 
 }
 
 Node sine(Input input, float freq, std::size_t midi_idx, envelope env) {
@@ -343,7 +342,7 @@ Node biquad_lowpass(const Input input, const float f0, const float Q) {  // temp
 
     auto func = [=] (std::span<float> sig) mutable -> float {
         float omega = 2 * M_PI * f0 / SAMPLING_FREQUENCY;   // used constants
-        float alpha = sin(omega) / 2 * Q;
+        float alpha = sin(omega) / (2 * Q);
         
         float b0 = (1 - cos(omega)) / 2;
         float b1 = (1 - cos(omega)); 
@@ -375,7 +374,7 @@ Node biquad_highpass(const Input input, const float f0, const float Q) {  // tem
 
     auto func = [=] (std::span<float> sig) mutable -> float {
         float omega = 2 * M_PI * f0 / SAMPLING_FREQUENCY;   // used constants
-        float alpha = sin(omega) / 2 * Q;
+        float alpha = sin(omega) / (2 * Q);
         
         float b0 = (1 + cos(omega)) / 2;
         float b1 = -(1 + cos(omega)); 
@@ -463,7 +462,7 @@ Node biquad_notch(const Input input, const float f0, const float BW) {  // BW in
     return node;
 }
 
-Node phaser(const Input input) {  // BW in octaves
+Node phaser(const Input input) {
     Input lfo_in;
     lfo_in.type = LFO_IN;
     float f0 = 10000;
@@ -474,7 +473,8 @@ Node phaser(const Input input) {  // BW in octaves
     float y2 = 0.0;
 
     auto func = [=] (std::span<float> sig) mutable -> float {
-        float omega = 2 * M_PI * f0 / SAMPLING_FREQUENCY;   // used constants
+        float f0_modulated = f0 + sig[1] * 3000;
+        float omega = 2 * M_PI * f0_modulated / SAMPLING_FREQUENCY;   // used constants
         float alpha = sin(omega) * sinh(M_LN2 /2 * BW * omega /sin(omega));
         
         float b0 = 1;
@@ -493,7 +493,7 @@ Node phaser(const Input input) {  // BW in octaves
         return output;
     };
 
-    std::vector<Input> inputs{input};
+    std::vector<Input> inputs{input, lfo_in};
     Node node(func, inputs);
     std::cout << "Added phaser" << std::endl;
     return node;
@@ -503,23 +503,23 @@ Node wah(const Input input) {  // template and low pass test
     Input lfo_in;
     lfo_in.type = LFO_IN;
     const float f0 = 10000;
-    const float Q = 0.2;
+    const float BW = 1;
     float x1 = 0.0; // sample buffers
     float x2 = 0.0; 
     float y1 = 0.0;
     float y2 = 0.0;
 
     auto func = [=] (std::span<float> sig) mutable -> float {
-        float f0_modulated;
+        float f0_modulated = f0 + sig[1] * 3000;
         float omega = 2 * M_PI * f0_modulated / SAMPLING_FREQUENCY;   // used constants
-        float alpha = sin(omega) / 2 * Q;
+        float alpha = sin(omega) * sinh(M_LN2 /2 * BW * omega /sin(omega));
         
-        float b0 = (1 - cos(omega)) / 2;
-        float b1 = (1 - cos(omega)); 
-        float b2 = ((1 - cos(omega)) / 2);
-        float a0 = (1 + alpha);
-        float a1 = (-2 * cos(omega));
-        float a2 = (1 - alpha) ;
+        float b0 = alpha;
+        float b1 = 0; 
+        float b2 = -alpha;
+        float a0 = 1 + alpha;
+        float a1 = -2 * cos(omega);
+        float a2 = 1 - alpha;
         
         float output = sig[0] * b0 / a0 + x1 * b1 / a0 + x2 * b2 / a0 - y1 * a1 / a0 - y2 * a2 / a0;
 
@@ -530,7 +530,7 @@ Node wah(const Input input) {  // template and low pass test
         return output;
     };
 
-    std::vector<Input> inputs{input};
+    std::vector<Input> inputs{input, lfo_in};
     Node node(func, inputs);
     std::cout << "Added wah" << std::endl;
     return node;
@@ -795,7 +795,7 @@ public:
                 midi_state[msg.note_on.index].velocity = msg.note_on.vel;
                 any_note_on ++;
                 any_vel = msg.note_on.vel;
-                std::cout << midi_state[msg.note_on.index].velocity << std::endl;
+                //std::cout << midi_state[msg.note_on.index].velocity << std::endl;
             } else if(msg.type == NOTE_OFF) {
                 midi_state[msg.note_on.index].note_on = 0;
                 any_note_on --;
@@ -865,56 +865,14 @@ int main() {
 
     // ADDING NODES
 
-    std::vector<float> note_freq = calculate_frequencies(220.0);
+    std::vector<float> note_freq = calculate_frequencies(110.0);
     std::vector<Input> inputs_definition;
     Synth synth;
     
 
     synth.midi.open_port(0);
     synth.midi.ignore_types(false, false, false);
-
     
-    /*
-    //Node noise_generator = noise(zero_in, env);
-    //Input noise_in = synth.addNode(noise_generator);
-
-     
-    for(std::size_t i = 48; i <= 72; i++) {
-        if(i == 48) {
-            Node osc = square(zero_in, note_freq[i], i, env);
-            Input osc_in = synth.addNode(osc);
-            inputs_definition.push_back(osc_in);
-        } else {
-            Node osc = square(inputs_definition[i-49], note_freq[i], i, env);
-            Input osc_in = synth.addNode(osc);
-            inputs_definition.push_back(osc_in);
-        }
-    }
-    
-    
-
-    //Node filter = biquad_lowpass(noise_in, 1000, 0.707);
-    //Input filter_in = synth.addNode(filter);
-
-    //Node delaynode = delay(inputs_definition.back(), 300, 3, 0.5);
-    //Input delay_in = synth.addNode(delaynode);
-    
-    //Node osc = square(zero_in, 440.0, 57);
-    //Input osc_in = synth.addNode(osc);
-
-    Node vib = tremolo(inputs_definition.back());
-    Input vib_in = synth.addNode(vib);
-
-    Node master = master_gain(vib_in, 2000);
-    Input master_in = synth.addNode(master);
-
-    Node saving = save_signal(master_in, 10000);
-    Input save_in = synth.addNode(saving);
-
-
-    Node output = audio_out(master_in, id);
-    Input out = synth.addNode(output);
-    */
     bool UI = true;
     int choice;
     int filter_choice;
@@ -932,10 +890,9 @@ int main() {
                 std::cout << "Virtual Synthesizer Menu:" << std::endl;
                 std::cout << "1. Add oscillators" << std::endl;
                 std::cout << "2. Add filter" << std::endl;
-                std::cout << "3. Add effect module" << std::endl;
-                std::cout << "4. Set LFO" << std::endl;
-                std::cout << "5. Display signal flow" << std::endl;
-                std::cout << "6. Done" << std::endl;
+                std::cout << "3. Set LFO" << std::endl;
+                std::cout << "4. Add effect module" << std::endl;
+                std::cout << "5. Done" << std::endl;
                 std::cin >> choice;
                 state = choice + 1;
             break;
@@ -947,11 +904,11 @@ int main() {
                 std::cout << "4. Triangle" << std::endl;
                 std::cout << "5. Noise generator" << std::endl;
                 std::cin >> choice;
+
                 int attack, decay, release;
                 std::cout << "Define envelope parameters" << std::endl;
                 std::cout << "Attack time [ms]:" << std::endl;
                 std::cin >> attack;
-                
                 
                 std::cout << "Decay time [ms]:" << std::endl;
                 std::cin >> decay;
@@ -1015,40 +972,41 @@ int main() {
                 std::cin >> filter_choice;
                 switch(filter_choice) {
                     case 1: { // lowpass
-                        std::cout << "define q factor" << std::endl;
-                        std::cin >> q;
-                        std::cout << "define cut-off frequency" << std::endl;
+                        std::cout << "Define cut-off frequency" << std::endl;
                         std::cin >> f0;
+                        std::cout << "Define q factor" << std::endl;
+                        std::cin >> q;
+
                         Node lowpass = biquad_lowpass(inputs_definition.back(), f0, q);
                         Input lowpass_in = synth.addNode(lowpass);
                         inputs_definition.push_back(lowpass_in);
                         break;
                     }
                     case 2: {// highpass
-                        std::cout << "define q factor" << std::endl;
-                        std::cin >> q;
-                        std::cout << "define cut-off frequency" << std::endl;
+                        std::cout << "Define cut-off frequency" << std::endl;
                         std::cin >> f0;
+                        std::cout << "Define q factor" << std::endl;
+                        std::cin >> q;
                         Node highpass = biquad_highpass(inputs_definition.back(), f0, q);
                         Input highpass_in = synth.addNode(highpass);
                         inputs_definition.push_back(highpass_in);
                         break;
                     }
                     case 3: { // bandpass
-                        std::cout << "define bw factor" << std::endl;
-                        std::cin >> bw;
                         std::cout << "define center frequency" << std::endl;
                         std::cin >> f0;
+                        std::cout << "define bw factor" << std::endl;
+                        std::cin >> bw;
                         Node bandpass = biquad_bandpass(inputs_definition.back(), f0, bw);
                         Input bandpass_in = synth.addNode(bandpass);
                         inputs_definition.push_back(bandpass_in);
                         break;
                     }
                     case 4: {// Notch
-                        std::cout << "define bw factor" << std::endl;
-                        std::cin >> bw;
                         std::cout << "define center frequency" << std::endl;
                         std::cin >> f0;
+                        std::cout << "define bw factor" << std::endl;
+                        std::cin >> bw;
                         Node notch = biquad_bandpass(inputs_definition.back(), f0, bw);
                         Input notch_in = synth.addNode(notch);
                         inputs_definition.push_back(notch_in);
@@ -1058,7 +1016,7 @@ int main() {
                 state = 1;
             break;
             case 4: // set lfo
-                std::cout << "define LFO frequency:" << std::endl;
+                std::cout << "Define LFO frequency:" << std::endl;
                 std::cin >> value;
                 synth.lfo.freq = value;
                 state = 1;
@@ -1067,8 +1025,8 @@ int main() {
                 std::cout << "Effect type:" << std::endl;
                 std::cout << "1. Delay" << std::endl;
                 std::cout << "2. Tremolo" << std::endl;
-                std::cout << "3. Wah" << std::endl;
-                std::cout << "4. Phaser" << std::endl;
+                std::cout << "3. Phaser" << std::endl;
+                std::cout << "4. Wah" << std::endl;
                 std::cin >> effect_choice;
                 int feedback;
                 int delay_time;
@@ -1108,12 +1066,11 @@ int main() {
                         break;
                     break;
                     }
-                    
                 }
                 state = 1;
             break;
-            case 7: // quit
-                std::cout << "define master volume:" << std::endl;
+            case 6: // quit
+                std::cout << "Define master volume:" << std::endl;
                 int volume;
                 std::cin >> volume;
                 Node master = master_gain(inputs_definition.back(), volume);
@@ -1124,16 +1081,12 @@ int main() {
         }
         choice = 0;
         value = 0;
-    }
+    }  
 
     Node output = audio_out(inputs_definition.back(), id);
     Input out = synth.addNode(output);
 
-    int iter;
-
     while(true) {
-        iter++;
-
         synth.step();
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
